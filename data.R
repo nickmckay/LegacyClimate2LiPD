@@ -54,22 +54,32 @@ leg2lipd <- function(siteId,datasetId){
 
   if(nrow(cmtMeta) > 1){
     #look at the paleodata to see if they have more lat longs present.
+    thisPmt <- filter(allReg,`ID (Site)` == siteId & `ID (Dataset)` == datasetId) %>%
+      select(Event:Continent) %>%
+      distinct()
 
-    print(glue("I don't think there should be more than 1 row, but there is in site {siteId}"))
+    if(nrow(thisPmt) > 1){
+      print(glue("I don't think there should be more than 1 row, but there is in site {siteId}"))
+
+      thisCmt <- filter(cmtMeta,near(`Longitude (DD)`,thisPmt$Longitude,tol = 1) & near(`Latitude (DD)`,thisPmt$Latitude,tol = 1) )
+      if(nrow(thisCmt) != 1){
+        print(glue("Tried to select by coordinates, but found {nrow(thisCmt)} for site {siteId}"))
+      }
+
+    }
+
+    #thisPaleo <- filter(allReg,`ID (Site)` == siteId)
+
+
+
   }
-
-  #thisPaleo <- filter(allReg,`ID (Site)` == siteId)
-
-
-
 }
-
-walk2(siteMeta$Site_ID,siteMeta$Dataset_ID,leg2lipd)
-
-
-
-all_cmt_Sites <- unique(s1$Site_ID)
+  walk2(siteMeta$Site_ID,siteMeta$Dataset_ID,leg2lipd)
 
 
 
-oneSite <- filter(allReg,`ID (Site)` ==  allSites[156])
+  all_cmt_Sites <- unique(s1$Site_ID)
+
+
+
+  oneSite <- filter(allReg,`ID (Site)` ==  allSites[156])
