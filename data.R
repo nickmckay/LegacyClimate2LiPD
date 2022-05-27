@@ -3,6 +3,10 @@ library(tidyverse)
 library(purrr)
 library(glue)
 library(googlesheets4)
+library(geoChronR)
+
+
+source("functions.R")
 
 set.seed(141)
 # Load in conversion ------------------------------------------------------
@@ -23,6 +27,9 @@ allSites <- unique(allReg$`ID (Site)`)
 #get chronData
 
 s1 <- read_delim("data/chron/Table-S1_chronological_control_points_metadata.csv")
+s1$Author_Comment <- str_remove_all(string = s1$Author_Comment,pattern = '[^A-Za-z0-9. ()<>-]')
+s1$Material_Dated <- str_remove_all(string = s1$Material_Dated,pattern = '[^A-Za-z0-9. ()<>-]')
+
 
 #apparently you need both site and dataset ids to get unique sites?
 siteMeta <- s1 %>%
@@ -48,198 +55,74 @@ s3 <- read_delim("data/chron/Table-S3_bacon_parameter_settings.csv")
 
 
 
-#function to create one file:
-leg2lipd <- function(siteId,datasetId){
+D <- map2(siteMeta$Site_ID,siteMeta$Dataset_ID,leg2lipd)
+good <- which(map_lgl(D,is.list))
+Dg <- D[good]
+tst <- extractTs(Dg)
+geoChronR::plotSummaryTs(tst)
 
 
-  # Get Site Metadata -------------------------------------------------------
-  thisCmt <- filter(s1,`Site_ID` == siteId & `Dataset_ID` == datasetId)
+#duplicated?
+dn <- map_chr(Dg,"dataSetName")
+dup <- duplicated(dn)
+dupNames <- unique(dn[dup])
 
-  cmtMeta <- select(thisCmt,Event:First_Publication) %>%
-    distinct()
+allDup <- which(dn %in% dupNames)
 
-  if(nrow(cmtMeta) == 1){
-    siteMeta <- cmtMeta
-  }else if(nrow(cmtMeta) > 1){
-    #look at the paleodata to see if they have more lat longs present.
-    thisPmt <- filter(allReg,`ID (Site)` == siteId & `ID (Dataset)` == datasetId) %>%
-      select(Event:Continent) %>%
-      distinct()
+nD <- list()
+for(ii in seq_along(dupNames)){
+  dni <- which(dn == dupNames[ii])
 
-    #see if any matches in paleo
-
-    siteMeta <- filter(cmtMeta,near(`Longitude (DD)`,thisPmt$Longitude,tol = 1) & near(`Latitude (DD)`,thisPmt$Latitude,tol = 1) )
-    if(nrow(siteMeta) == 0){
-      print(glue("no paleo matches for site: {siteId}, dataset: {datasetId}. Skipping."))
-      return(NA)
-    }else if(nrow(siteMeta) > 1){
-      print(glue("multiple paleo matches for site: {siteId}, dataset: {datasetId}. Skipping."))
-    }else{
-      print(glue("Found 1 paleo match for site: {siteId}, dataset: {datasetId}. Yay?"))
-
-    }
-  }else{
-    return(NA)
+  nD[[dupNames[ii]]] <- Dg[[dni[1]]]
+  for(i in 2:length(dni)){
+    nD[[dupNames[ii]]]$paleoData[[i]] <-  Dg[[dni[i]]]$paleoData[[1]]
   }
 
-
-  # Create root -------------------------------------------------------------
-
-  L <- list()
-  L$lipdVersion <- 1.3
-  L$archiveType <- siteMeta$Archive_Type
-  firstAuthor <- str_split(siteMeta$First_Publication,pattern = ",")[[1]][1] %>%
-    str_remove_all("[^A-Za-z]")
-  if(is.na(firstAuthor)){
-    firstAuthor <- "author"
-  }
-  pubYear <-  str_extract(siteMeta$First_Publication,pattern = "([0-9][0-9][0-9][0-9])")
-  if(is.na(pubYear)){
-    pubYear <- "1111"
-  }
-
-  sitename <- siteMeta$Site_Name %>% str_remove_all(" ") %>%
-    str_remove_all("[^A-Za-z0-9]")
-
-  L$dataSetName <- paste(sitename,firstAuthor,pubYear,sep = ".")
-
-  #Be aware there will be duplicate dataset names
-  L$datasetId <- paste0("LC",digest::digest(siteMeta))
-
-  L$createdBy <- "github.com/nickmckay/LegacyClimate2LiPD"
-
-  L <- lipdverseR::initializeChangelog(L)
-
-  # Geo metadata ------------------------------------------------------------
-  geo <- list()
-  geo$latitude <- siteMeta$`Latitude (DD)`
-  geo$longitude <- siteMeta$`Longitude (DD)`
-  geo$description <- siteMeta$Site_Description
-  geo$siteName <- siteMeta$Site_Name
-  geo$continent <- siteMeta$Continent
-
-  L$geo <- geo
-
-  # Pub metadata ------------------------------------------------------------
-
-  pub <- vector(mode = "list",length = 1)
-  pub[[1]]$citation <- siteMeta$First_Publication
-
-  L$pub <- pub
-
-  # Paleodata ---------------------------------------------------------------
-
-  #check paleo metadata
-  paleoMeta <- filter(allReg,`ID (Site)` == siteId & `ID (Dataset)` == datasetId) %>%
-    select(Event:Continent) %>%
-    distinct()
-
-  if(nrow(paleoMeta) != 1){
-    stop("this is bad")
-  }
-
-  thisPmt <- filter(allReg,`ID (Site)` == siteId & `ID (Dataset)` == datasetId) %>%
-    select(contains("["))
-
-  an <- names(thisPmt)
-
-  pmt <-vector(mode = "list",length = 1)
-
-  for(coll in 1:length(an)){
-    #get conversion row
-    cr <- which(conv$ColName == an[coll])
-    if(length(cr) != 1){
-      stop("bad conv match")
-    }
-    thisCol <- list()
-    thisCol$number <- coll
-    thisCol$TSid <- createTSid("lc")
-    thisCol$values <- as.matrix(thisPmt[,coll])
-    thisCol$variableName <- conv$variableName[cr]
-    thisCol$units <- conv$units[cr]
-    thisCol$primaryTimeseries <- conv$primaryTimeseries[cr]
-    thisCol$primaryAgeColumn <- conv$primaryAgeColumn[cr]
-    thisCol$summaryStatistic <- conv$`summary statistic`[cr]
-    if(!is.na(conv$calibration_method[cr])){
-      thisCol$calibration <- list()
-      thisCol$calibration$method <- conv$calibration_method[cr]
-      thisCol$calibration$target <- conv$calibration_target[cr]
-      thisCol$interpretation <- vector(mode = "list",length = 1)
-      thisCol$interpretation[[1]]$scope <- "climate"
-      thisCol$interpretation[[1]]$variable <- conv$interpVariable[cr]
-      thisCol$interpretation[[1]]$variableDetail <- conv$interpVariableDetail[cr]
-      thisCol$interpretation[[1]]$seasonality <- conv$seasonality[cr]
-    }
-
-    pmt[[1]][[paste0(conv$variableName[cr],coll)]] <- thisCol
-  }
-
-  L$paleoData <- vector(mode = "list",length = 1)
-  L$paleoData[[1]]$measurementTable <- pmt
-
-  # chronData ---------------------------------------------------------------
-
-
-  #check chron metadata
-  chronMeta <- thisCmt %>%
-    select(Event:Continent) %>%
-    distinct()
-
-  if(nrow(chronMeta) != 1){
-    stop("this is bad for chron")
-  }
-
-  #prep data frame
-
-  cd <- thisCmt %>%
-    select(!Event:Continent) %>%
-    mutate(age14C = `Age_Uncalibrated (kyr BP)`*1000) %>%
-    mutate(age = `Age_Calibrated (kyr BP)`*1000) %>%
-    mutate(ageUncertainty = `Calibrated dating_Error (kyr)`*1000)
-
-  cd$age14CUncertainty <- 1000*(cd$`Dating Error_Older (kyr)` + cd$`Dating Error_Younger (kyr)`)/2
-  cd$depth_top <- cd$`Depth (cm)` - cd$`Thickness (cm)`/2
-  cd$depth_bottom <- cd$`Depth (cm)` + cd$`Thickness (cm)`/2
-
-  toRem <- c("Age_Uncalibrated (kyr BP)", "Dating Error_Older (kyr)","Dating Error_Younger (kyr)","Age_Calibrated (kyr BP)","Calibrated dating_Error (kyr)")
-  cd <- cd %>%
-    select(-c(1:4)) %>%
-    select(!all_of(toRem))
-
-
-  cdn <- names(cd)
-
-  cmt <-vector(mode = "list",length = 1)
-
-  for(i in 1:length(cdn)){
-    #get conversion row
-    cr <- which(convChron$ColName == cdn[i])
-    if(length(cr) != 1){
-      stop("bad conv match")
-    }
-    thisCol <- list()
-    thisCol$number <- i
-    thisCol$TSid <- createTSid("lc-ch")
-    thisCol$values <- as.matrix(cd[,i])
-    thisCol$variableName <- convChron$variableName[cr]
-    thisCol$units <- convChron$units[cr]
-    if(!is.na(convChron$`summary statistic`[cr])){
-      thisCol$summaryStatistic <- convChron$`summary statistic`[cr]
-    }
-
-
-    cmt[[1]][[conv$variableName[cr]]] <- thisCol
-  }
-
-  L$chronData <- vector(mode = "list",length = 1)
-  L$chronData[[1]]$measurementTable <- cmt
-
-
-return(L)
 }
-#  test <- map2(siteMeta$Site_ID,siteMeta$Dataset_ID,leg2lipd)
 
 
+nDts <- extractTs(nD)
+dupTs <- extractTs(Dg[allDup])
+
+if(length(nDts) != length(dupTs)){
+  stop("these lengths should match")
+}
+
+Dgnd <- Dg[-allDup]
+an <- map_chr(Dgnd,"dataSetName")
+if(length(an) != length(unique(an))){
+  stop("should all be unique")
+}
+
+names(Dgnd) <- an
+
+Df <- append(Dgnd,nD)
+
+
+#final check
+
+check <- map_lgl(Df,lipdR:::validLipd)
+
+if(sum(!check) > 0){
+  stop("errors")
+}
+
+writeLipd(Df,path = "~/Dropbox/lipdverse/LegacyClimate/")
+
+
+
+
+
+#
+# DUP <- Dg[ii]
+# ts <- extractTs(DUP) %>% ts2tibble()
+# tstemp <- filter(ts,paleoData_primaryTimeseries == TRUE) %>% filter(paleoData_variableName == "temperature")
+#
+# plotTimeseriesStack(tstemp,time.var = "age")
+#
+# a <- 1
+# plot(tstemp$age[[a]],tstemp$paleoData_values[[a]])
+# lines(tstemp$age[[a+2]],tstemp$paleoData_values[[a+2]])
 
 # all_cmt_Sites <- unique(s1$Site_ID)
 
